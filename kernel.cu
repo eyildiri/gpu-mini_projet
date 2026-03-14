@@ -430,8 +430,7 @@ int main()
         << std::endl;
 
     const int numRuns = 100;
-    const int threadsPerBlock = 256;
-
+    const int threadsPerBlock = 256; // the warp size is 32 (gpu prop) => 256 good choice to have enough warps per block and good occupancy
     // 1) Performance vs N
     const int N_values[] = {
         1 << 10,
