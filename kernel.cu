@@ -31,11 +31,9 @@ const char* opToString(Operation op)
     }
 }
 
-// ------------------------------------------------------------
 // KERNEL
-// Chaque thread traite j éléments voisins.
-// k augmente l'intensité de calcul.
-// ------------------------------------------------------------
+// Each thread processes j neighboring elements.
+// k increases the computational intensity.
 __global__ void vectorOpKernel(DataT* d_c, const DataT* d_a, const DataT* d_b,
     int N, int j, int k, int op)
 {
@@ -65,9 +63,7 @@ __global__ void vectorOpKernel(DataT* d_c, const DataT* d_a, const DataT* d_b,
     }
 }
 
-// ------------------------------------------------------------
 // CPU reference
-// ------------------------------------------------------------
 void vectorOpCPU(DataT* h_c, const DataT* h_a, const DataT* h_b,
     int N, int k, Operation op)
 {
@@ -91,9 +87,7 @@ void vectorOpCPU(DataT* h_c, const DataT* h_a, const DataT* h_b,
     }
 }
 
-// ------------------------------------------------------------
-// Vérification CPU / GPU
-// ------------------------------------------------------------
+// CPU / GPU verification
 bool checkCuda(const DataT* h_cpu, const DataT* h_gpu, int N)
 {
     const float absEps = 1e-5f;
@@ -115,9 +109,7 @@ bool checkCuda(const DataT* h_cpu, const DataT* h_gpu, int N)
     return true;
 }
 
-// ------------------------------------------------------------
 // GPU device info
-// ------------------------------------------------------------
 void printDeviceInfo()
 {
     int device = 0;
@@ -138,12 +130,10 @@ void printDeviceInfo()
     std::cout << "GPU_REGS_PER_BLOCK," << prop.regsPerBlock << std::endl;
 }
 
-// ------------------------------------------------------------
-// Fonction style template
-// - retourne cudaError_t
-// - alloue/cop ie/lance/copie retour/nettoie
-// - mesure le temps moyen du kernel
-// ------------------------------------------------------------
+// vectorOpWithCuda 
+// - returns cudaError_t
+// - allocates / copies / launches / copies back / cleans up
+// - measures the average kernel runtime
 cudaError_t vectorOpWithCuda(DataT* h_c,
     const DataT* h_a,
     const DataT* h_b,
@@ -163,6 +153,10 @@ cudaError_t vectorOpWithCuda(DataT* h_c,
     cudaEvent_t stop = 0;
 
     cudaError_t cudaStatus;
+
+    int logicalThreads = 0;
+    dim3 block_size(1);
+    dim3 thread_size(1);
 
     *avgKernelTimeMs = 0.0f;
 
@@ -217,15 +211,12 @@ cudaError_t vectorOpWithCuda(DataT* h_c,
         goto Error;
     }
 
-    // TP2: nombre de threads logiques si 1 thread traite j éléments
-    //int logicalThreads = (N + j - 1) / j;
-    //int blocks = (logicalThreads + threadsPerBlock - 1) / threadsPerBlock;
-    int logicalThreads = (N + j - 1) / j;
-    dim3 block_size((logicalThreads + threadsPerBlock - 1) / threadsPerBlock);
-    dim3 thread_size(threadsPerBlock);
+    logicalThreads = (N + j - 1) / j;
+    block_size = dim3((logicalThreads + threadsPerBlock - 1) / threadsPerBlock);
+    thread_size = dim3(threadsPerBlock);
 
-    // Warm-up : on lance une fois le kernel pour éviter d'inclure dans le temps mesuré les éventuels overheads de la première exécution (compilation JIT, etc.)
-    vectorOpKernel <<<block_size, thread_size>>> (d_c, d_a, d_b, N, j, k, (int)op);
+    // Warm-up: launch the kernel once to avoid including first-launch compilation in the measured time
+    vectorOpKernel<<<block_size, thread_size>>>(d_c, d_a, d_b, N, j, k, (int)op);
 
     cudaStatus = cudaGetLastError();
     if (cudaStatus != cudaSuccess) {
@@ -247,7 +238,7 @@ cudaError_t vectorOpWithCuda(DataT* h_c,
     }
 
     for (int run = 0; run < numRuns; run++) {
-        vectorOpKernel <<<block_size, thread_size >>> (d_c, d_a, d_b, N, j, k, (int)op);
+        vectorOpKernel<<<block_size, thread_size>>>(d_c, d_a, d_b, N, j, k, (int)op);
 
         cudaStatus = cudaGetLastError();
         if (cudaStatus != cudaSuccess) {
@@ -297,16 +288,15 @@ Error:
     return cudaStatus;
 }
 
-// ------------------------------------------------------------
-// Un cas complet : CPU + GPU + vérification + métriques
-// ------------------------------------------------------------
+// One complete case: CPU + GPU + verification + metrics
 bool runOneCase(const char* experiment,
     Operation op,
     int N,
     int threadsPerBlock,
     int j,
     int k,
-    int numRuns)
+    int numRuns,
+    int cpuRuns)
 {
     bool ok = false;
 
@@ -325,40 +315,41 @@ bool runOneCase(const char* experiment,
         goto Cleanup;
     }
 
+    // Initialize input arrays
+	// a = [0, 1, 2, ...], b = [N, N-1, N-2, ...]
     for (int i = 0; i < N; i++) {
-        h_a[i] = 0.5f + 0.001f * (float)(i % 100);
-        h_b[i] = 0.90f + 0.0005f * (float)(i % 50);
-        h_cpu[i] = 0.0f;
-        h_gpu[i] = 0.0f;
+        h_a[i] = (DataT)i;
+        h_b[i] = (DataT)(N - i);
+        h_cpu[i] = (DataT)0;
+        h_gpu[i] = (DataT)0;
     }
 
-    // ----------------------------
-    // CPU benchmark: warm-up + moyenne
-    // ----------------------------
-    const int cpuRuns = 50;
+    // CPU benchmark
+    double cpuTimeUs = -1.0; // For roofline, we skip CPU timing 
 
-    // Warm-up CPU
-    vectorOpCPU(h_cpu, h_a, h_b, N, k, op);
-
-    double totalCpuTimeUs = 0.0;
-
-    for (int run = 0; run < cpuRuns; run++) {
-        auto cpuStart = std::chrono::high_resolution_clock::now();
+    // For roofline, cpu is not compute to gain execution time
+    if (cpuRuns > 0) {
+        // CPU warm-up
         vectorOpCPU(h_cpu, h_a, h_b, N, k, op);
-        auto cpuStop = std::chrono::high_resolution_clock::now();
 
-        totalCpuTimeUs +=
-            (double)std::chrono::duration_cast<std::chrono::microseconds>(cpuStop - cpuStart).count();
+        double totalCpuTimeUs = 0.0;
+
+        for (int run = 0; run < cpuRuns; run++) {
+            auto cpuStart = std::chrono::high_resolution_clock::now();
+            vectorOpCPU(h_cpu, h_a, h_b, N, k, op);
+            auto cpuStop = std::chrono::high_resolution_clock::now();
+
+            totalCpuTimeUs +=
+                (double)std::chrono::duration_cast<std::chrono::microseconds>(cpuStop - cpuStart).count();
+        }
+
+        cpuTimeUs = totalCpuTimeUs / (double)cpuRuns;
     }
 
-    double cpuTimeUs = totalCpuTimeUs / (double)cpuRuns;
-
-    // On garde le dernier résultat CPU dans h_cpu pour la vérification
+    // Always recompute once on CPU for verification
     vectorOpCPU(h_cpu, h_a, h_b, N, k, op);
 
-    // ----------------------------
     // GPU benchmark
-    // ----------------------------
     {
         float avgKernelTimeMs = 0.0f;
 
@@ -374,13 +365,17 @@ bool runOneCase(const char* experiment,
         ok = checkCuda(h_cpu, h_gpu, N);
 
         double gpuTimeUs = (double)avgKernelTimeMs * 1000.0;
-        double speedup = (gpuTimeUs > 0.0) ? (cpuTimeUs / gpuTimeUs) : 0.0;
+        double speedup = 0.0;
 
-        // 2 lectures + 1 écriture par élément
+        if (cpuRuns > 0 && gpuTimeUs > 0.0) {
+            speedup = cpuTimeUs / gpuTimeUs;
+        }
+
+        // 2 reads + 1 write per element
         double bytesMoved = 3.0 * (double)N * sizeof(DataT);
         double memoryThroughputGBs = bytesMoved / (double)avgKernelTimeMs / 1e6;
 
-        // k opérations par élément
+        // k operations per element
         double operations = (double)N * (double)k;
         double computeThroughputGOPS = operations / (double)avgKernelTimeMs / 1e6;
 
@@ -413,13 +408,12 @@ Cleanup:
     return ok;
 }
 
-// ------------------------------------------------------------
-// MAIN
-// ------------------------------------------------------------
+// ----------
+// -- MAIN --
+// ----------
 int main()
 {
-    // IMPORTANT : utiliser Release x64
-    // CSV columns:
+    // "CSV" columns:
     // experiment,operation,datatype,N,threads_per_block,j,k,cpu_us,gpu_us,speedup,memory_GBs,compute_GOPS,compute_intensity_OPS_per_byte,correct
 
     printDeviceInfo();
@@ -430,24 +424,25 @@ int main()
         << std::endl;
 
     const int numRuns = 100;
-    const int threadsPerBlock = 256; // the warp size is 32 (gpu prop) => 256 good choice to have enough warps per block and good occupancy
+    const int threadsPerBlock = 256;
+
     // 1) Performance vs N
     const int N_values[] = {
-        1 << 10,
-        1 << 12,
-        1 << 14,
-        1 << 16,
-        1 << 18,
-        1 << 20,
-        1 << 22,
-        1 << 23
+        1 << 10, // 1024
+        1 << 12, // 4096
+        1 << 14, // 16384
+        1 << 16, // 65536
+        1 << 18, // 262144
+        1 << 20, // 1048576
+        1 << 22, // 4194304
+        1 << 23  // 8388608
     };
 
     for (int opi = 0; opi < 2; opi++) {
         Operation op = (opi == 0) ? OP_ADD : OP_MUL;
 
         for (int i = 0; i < (int)(sizeof(N_values) / sizeof(N_values[0])); i++) {
-            runOneCase("vsN", op, N_values[i], threadsPerBlock, 1, 1, numRuns);
+            runOneCase("vsN", op, N_values[i], threadsPerBlock, 1, 1, numRuns, 50);
         }
     }
 
@@ -459,20 +454,20 @@ int main()
         Operation op = (opi == 0) ? OP_ADD : OP_MUL;
 
         for (int i = 0; i < (int)(sizeof(j_values) / sizeof(j_values[0])); i++) {
-            runOneCase("vsJ", op, fixedN_for_j, threadsPerBlock, j_values[i], 1, numRuns);
+            runOneCase("vsJ", op, fixedN_for_j, threadsPerBlock, j_values[i], 1, numRuns, 50);
         }
     }
 
-    // 3) Roofline / intensité vs k
+    // 3) Roofline / intensity vs k
     const int fixedN_for_k = 1 << 22;
     const int fixedJ_for_k = 1;
-    const int k_values[] = { 1, 2, 4, 8, 16, 32, 64 };
+    const int k_values[] = { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 };
 
     for (int opi = 0; opi < 2; opi++) {
         Operation op = (opi == 0) ? OP_ADD : OP_MUL;
 
         for (int i = 0; i < (int)(sizeof(k_values) / sizeof(k_values[0])); i++) {
-            runOneCase("roofline", op, fixedN_for_k, threadsPerBlock, fixedJ_for_k, k_values[i], numRuns);
+            runOneCase("roofline", op, fixedN_for_k, threadsPerBlock, fixedJ_for_k, k_values[i], numRuns, 0);
         }
     }
 
